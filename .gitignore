@@ -1,0 +1,34 @@
+# 编译输出
+output/
+build/
+*.o
+*.a
+*.elf
+*.bin
+*.map
+
+# Edge Impulse大型模型文件（通过git lfs管理）
+models/edge_impulse/*.zip
+
+# 临时文件
+*.tmp
+*.log
+~$*
+
+# IDE
+.vscode/settings.json
+.idea/
+*.ioc
+
+# macOS / Windows
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python
+__pycache__/
+*.pyc
+.env
+
+# 大型数据集（通过git lfs或单独存储）
+datasets/sisfall_raw/
