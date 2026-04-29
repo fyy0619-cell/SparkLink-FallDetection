@@ -110,3 +110,10 @@ SparkLink-FallDetection/
 - [SisFall数据集](http://sistemic.udea.edu.co/en/research/projects/sisfall/)
 - [LiteOS开源仓库](https://gitee.com/LiteOS/LiteOS)
 - [星闪联盟官网](https://www.sparklink.org.cn)
+
+---
+
+## Latest Debug Reports
+
+- CN: [fall-detect-sle-debug-summary-2026-04-29](docs/fall-detect-sle-debug-summary-2026-04-29.md)
+- EN: [fall-detect-sle-debug-summary-2026-04-29-en](docs/fall-detect-sle-debug-summary-2026-04-29-en.md)
