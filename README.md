@@ -37,6 +37,7 @@
 | 驱动 | I2C（GPIO15/16）、C/C++混合编译 |
 | AI推理 | Edge Impulse → TinyML模型 → LiteOS部署 |
 | 通信 | SLE（星闪）、BLE（蓝牙低功耗） |
+| 工程规范 | UTF-8（无BOM）源码编码、Git文本管理、PowerShell编码修复脚本 |
 | 数据集 | SisFall Enhanced + 自采数据（normal/fall） |
 
 ---
@@ -100,6 +101,8 @@ SparkLink-FallDetection/
 - **2026.04.11** — 跌倒检测推理流程全链路跑通
 - **2026.04.21** — 系统学习星闪SLE与BLE原理
 - **2026.04.24** — 解决SLE+雷达并行时的供电不足问题
+- **2026.04.26** — 修复SLE SSAP通知链路（服务发现 + CCCD + 激活写）
+- **2026.04.30** — 修复中文注释乱码，统一UTF-8（无BOM）编码规范
 
 ---
 

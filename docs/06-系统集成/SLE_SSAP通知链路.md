@@ -199,3 +199,4 @@ endif()
 | AI 推理框架 | Edge Impulse SDK + TensorFlow Lite Micro |
 | 传感器 | MPU6050（I²C，GPIO15=SCL，GPIO16=SDA） |
 | 告警输出 | GPIO_09 LED + UART 串口打印 |
+| 工程质量 | UTF-8（无BOM）编码规范、`rg` 乱码扫描、PowerShell 编码修复脚本 |
