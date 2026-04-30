@@ -35,6 +35,7 @@
 | 硬件 | HiSilicon WS63、MPU6050、MH-CD42锂电管理 |
 | 系统 | LiteOS（华为轻量级RTOS） |
 | 驱动 | I2C（GPIO15/16）、C/C++混合编译 |
+| 外设 | WS2812B RGB灯带（单总线时序驱动） |
 | AI推理 | Edge Impulse → TinyML模型 → LiteOS部署 |
 | 通信 | SLE（星闪）、BLE（蓝牙低功耗） |
 | 工程规范 | UTF-8（无BOM）源码编码、Git文本管理、PowerShell编码修复脚本 |
@@ -103,6 +104,7 @@ SparkLink-FallDetection/
 - **2026.04.24** — 解决SLE+雷达并行时的供电不足问题
 - **2026.04.26** — 修复SLE SSAP通知链路（服务发现 + CCCD + 激活写）
 - **2026.04.30** — 修复中文注释乱码，统一UTF-8（无BOM）编码规范
+- **2026.05.01** — 完成WS2812B灯带告警集成（时序调参 + 告警闪烁任务）
 
 ---
 
