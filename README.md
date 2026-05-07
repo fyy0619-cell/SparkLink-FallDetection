@@ -124,3 +124,4 @@ SparkLink-FallDetection/
 - EN: [fall-detect-sle-debug-summary-2026-04-29-en](docs/fall-detect-sle-debug-summary-2026-04-29-en.md)
 
 - CN: [EdgeImpulse_WS63_部署调试记录_2026-05-07](docs/04-TinyML模型/EdgeImpulse_WS63_部署调试记录_2026-05-07.md)
+- CN: [EdgeImpulse_训练数据全过程_2026-05-07](docs/04-TinyML模型/EdgeImpulse_训练数据全过程_2026-05-07.md)

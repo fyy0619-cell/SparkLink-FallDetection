@@ -620,3 +620,11 @@ Edge Impulse 模型 + MPU6050 物理特征门控 + 连续窗口确认 + SLE SOS 
 ```
 
 工程当前可以用于比赛演示，但真实产品级仍建议使用板端自采数据重新训练模型。
+
+---
+
+## 19. 配套训练过程文档
+
+Edge Impulse 平台上的数据准备、上传标签、Impulse 设计、Spectral features、Classifier 训练、Model testing 和 Deployment 导出过程已单独整理：
+
+[`EdgeImpulse_训练数据全过程_2026-05-07.md`](EdgeImpulse_训练数据全过程_2026-05-07.md)
