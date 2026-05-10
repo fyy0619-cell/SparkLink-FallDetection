@@ -260,3 +260,16 @@ RTOS
 | 协议标准 | 星闪联盟官网 sparklink.org.cn |
 | RTOS | LiteOS官方Gitee仓库 |
 | 书籍 | 《TinyML》— Pete Warden（O'Reilly） |
+
+---
+
+## 追加路线：远程报警与户外化
+
+- [x] SLE Client 收到跌倒信号后投递远程报警事件
+- [x] Board B Wi-Fi 网关通过 HTTP POST 上报后端
+- [x] Python 后端完成 token 校验、限流和 dry-run
+- [x] PushPlus 微信推送完成手机端报警闭环
+- [ ] 接入 4G Cat.1/DTU 模块，替换 Wi-Fi 网关
+- [ ] 增加 GPS/北斗定位、SOS 按键、误报撤销和电池管理
+
+详细记录见：[远程报警链路与户外化方案-2026-05-10](docs/06-系统集成/远程报警链路与户外化方案-2026-05-10.md)

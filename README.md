@@ -125,3 +125,13 @@ SparkLink-FallDetection/
 
 - CN: [EdgeImpulse_WS63_部署调试记录_2026-05-07](docs/04-TinyML模型/EdgeImpulse_WS63_部署调试记录_2026-05-07.md)
 - CN: [EdgeImpulse_训练数据全过程_2026-05-07](docs/04-TinyML模型/EdgeImpulse_训练数据全过程_2026-05-07.md)
+
+## 远程报警与户外化方案
+
+- CN: [远程报警链路与户外化方案-2026-05-10](docs/06-系统集成/远程报警链路与户外化方案-2026-05-10.md)
+- Tool: [fall_alert_backend_demo.py](tools/fall_alert_backend_demo.py) - 支持 dry-run、PushPlus 微信推送、腾讯云短信/语音预留。
+- Env: [fall_alert_backend.env.example](tools/fall_alert_backend.env.example) - 后端环境变量模板，不包含真实密钥。
+
+当前已验证链路：Board A 跌倒检测 -> SLE 0x05 -> Board B 本地声光报警 -> Wi-Fi HTTP -> Python 后端 -> PushPlus 微信通知。
+
+户外产品化方向：将 Wi-Fi 网关替换为 4G Cat.1/DTU + GPS/北斗，实现脱离电脑和局域网的独立报警。
