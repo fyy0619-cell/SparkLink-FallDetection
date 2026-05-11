@@ -1,4 +1,7 @@
-# SLE（星闪）与BLE（蓝牙低功耗）对比
+﻿# SLE（星闪）与BLE（蓝牙低功耗）对比
+
+> 小白先看：本目录新增了 [`SLE_communication_beginner_guide.md`](SLE_communication_beginner_guide.md)，按本项目源码解释 SLE 从广播、扫描、连接、服务发现到发送 `0x05` 告警的完整实现。
+
 
 ## 协议概览
 
@@ -258,3 +261,4 @@ grep -r "sle_connection" middleware/ --include="*.h" -l
 # 找回调函数注册接口
 grep -r "register_.*callback" middleware/services/communication/
 ```
+

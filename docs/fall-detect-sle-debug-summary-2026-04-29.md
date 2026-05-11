@@ -1,5 +1,8 @@
 ﻿# Fall Detect + SLE 联调问题复盘（2026-04-29）
 
+> 新增入门长文：如果你想从零理解 SLE 通信原理、工程分层、Server/Client 启动流程、开发板上手步骤，以及 SLE 与 BLE/蓝牙的关系，请先阅读 [`05-通信协议/SLE_communication_beginner_guide.md`](05-通信协议/SLE_communication_beginner_guide.md)。
+
+
 ## 1. 项目目标
 - Server 端检测跌倒后，通过 SLE/SSAP 向 Client 发送告警数据（0x05）。
 - Client 收到 0x05 后触发蜂鸣器报警，并在 10 秒后自动停止。
@@ -84,3 +87,4 @@
 - 增加 `0x00` 恢复包：允许 Server 远程提前停止蜂鸣器。
 - 告警包增加序列号/时间戳，便于重传排查。
 - 在 Server 记录每次 `sle_send_fall_alert` 返回码，提升现场可观测性。
+
