@@ -1,11 +1,20 @@
-﻿-- V100C / Air780EHV DTU UART fall alert call task.
--- Purpose:
---   Receive one JSON line from WS63 over UART, then make a phone call.
--- Test line:
---   {"cmd":"call","phone":"13800138000"}\r\n
--- Adjust these values according to the DTU board manual.
+-- V100C / Air780EHV DTU task for WS63 fall-alert phone calls.
+--
+-- This version is written for the Yinerda DTU firmware task API, not for a
+-- bare LuatOS uart.on() project.
+--
+-- Hardware path:
+--   WS63 TX  -> V100C RXD
+--   WS63 RX  <- V100C TXD
+--   WS63 GND -> V100C GND
+--
+-- Confirmed V100C external RXD/TXD channel:
+--   UartGetRecChAndDel(1)
+--
+-- Test line sent from PC serial assistant or WS63:
+--   {"cmd":"fall_alert","phone":"13800138000","device":"ws63-fall-client-001","payload":5}\r\n
+
 local UART_ID = 1
-local UART_BAUD = 115200
 local DEFAULT_PHONE = "" -- Optional fallback phone number.
 local DIAL_TIMEOUT_MS = 30000
 
@@ -134,10 +143,21 @@ local function feedUartData(data)
         handleJsonLine(line)
     end
 
-    -- Prevent an invalid stream from consuming RAM forever.
+    -- Prevent a malformed stream from consuming RAM forever.
     if #rxbuf > 512 then
         log.warn(tname, "rxbuf overflow, clear")
         rxbuf = ""
+    end
+end
+
+local function pollUartChannel()
+    while true do
+        local data = UartGetRecChAndDel(UART_ID)
+        if data then
+            feedUartData(data)
+        else
+            sys.wait(100)
+        end
     end
 end
 
@@ -155,19 +175,11 @@ sys.taskInit(function()
         audio.vol(0, 70)
     end
 
-    -- Some DTU demos disable protocol receive channel before custom handling.
-    -- Keep this line only if the seller confirms it is needed.
-    -- PronetStopProRecCh(1)
+    -- Required by the Yinerda DTU firmware when a user task wants to consume
+    -- serial data by itself instead of letting the built-in transparent
+    -- transmission engine process it.
+    UartStopProRecCh(1)
 
-    uart.setup(UART_ID, UART_BAUD, 8, 1, uart.NONE)
-    uart.on(UART_ID, "receive", function(id, len)
-        local data = uart.read(id, len)
-        feedUartData(data)
-    end)
-
-    log.info(tname, "uart ready", UART_ID, UART_BAUD)
-
-    while true do
-        sys.wait(1000)
-    end
+    log.info(tname, "uart task ready", UART_ID)
+    pollUartChannel()
 end)

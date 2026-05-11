@@ -108,6 +108,7 @@ SparkLink-FallDetection/
 - **2026.05.07** — 完成Edge Impulse模型部署调试，梳理训练数据全过程
 - **2026.05.09** — 打通Board B Wi-Fi网关、HTTP后端与PushPlus微信远程报警闭环
 - **2026.05.10** — 形成户外化4G Cat.1/DTU方案，补充V100C/Air780EHV串口JSON触发电话的接入设计
+- **2026.05.11** — 结合银尔达V100C与Air780 API文档，确认外部RXD/TXD使用`UartGetRecChAndDel(1)`并补充小白版DTU原理说明
 
 ---
 
