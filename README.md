@@ -133,6 +133,8 @@ SparkLink-FallDetection/
 
 ## 远程报警与户外化方案
 
+- CN: [V100C_Air780EHV_UART_call_debug_2026-05-13](docs/06-系统集成/V100C_Air780EHV_UART_call_debug_2026-05-13.md)
+- Tool: [V100C_PASTE_THIS_TO_TASK1.lua](tools/V100C_PASTE_THIS_TO_TASK1.lua) - 银尔达 V100C 后台任务1可直接粘贴脚本，读取 WS63 UART JSON 后拨号。
 - CN: [远程报警链路与户外化方案-2026-05-10](docs/06-系统集成/远程报警链路与户外化方案-2026-05-10.md)
 - Tool: [fall_alert_backend_demo.py](tools/fall_alert_backend_demo.py) - 支持 dry-run、PushPlus 微信推送、腾讯云短信/语音预留。
 - Env: [fall_alert_backend.env.example](tools/fall_alert_backend.env.example) - 后端环境变量模板，不包含真实密钥。
