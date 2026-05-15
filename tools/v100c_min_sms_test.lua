@@ -1,13 +1,15 @@
 function
-    -- V100C / Air780EHV 短信能力最小验证脚本。
-    -- 用途：在接正式 UART 任务前，先单独确认该固件支持 sms.send 且 SIM 能发短信。
-    -- 用法：把占位号码改成测试手机号，整段粘到银尔达后台任务1，启动后看手机是否收到短信。
+    -- V100C / Air780EHV minimal SMS capability test.
+    -- Purpose: before using the real UART task, verify this firmware
+    -- exposes sms.send and the SIM can actually send an SMS.
+    -- Usage: change the placeholder number to a test phone, paste the
+    -- whole script into Yinerda backend task 1, start it, watch the phone.
     local tname = "min_sms_test"
     local phone = "123xxxx4567"
     local text  = "WS63 fall alert SMS test"
 
     log.info(tname, "min sms test start")
-    -- 等模块注册到网络后再发
+    -- wait for the module to register on the network
     sys.wait(8000)
 
     if type(sms) ~= "table" or type(sms.send) ~= "function" then
