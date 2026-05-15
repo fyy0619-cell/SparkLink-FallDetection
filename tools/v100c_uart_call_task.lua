@@ -66,7 +66,6 @@ function
         if not text or text == "" then
             text = "Fall detected. Please check now."
         end
-        -- sms 库由固件提供；若该固件未带 sms 库则跳过，不影响打电话
         if type(sms) ~= "table" or type(sms.send) ~= "function" then
             log.info(tname, "sms lib not available in this firmware")
             return false
