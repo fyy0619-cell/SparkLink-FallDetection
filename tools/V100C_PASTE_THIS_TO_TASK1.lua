@@ -58,6 +58,24 @@ function
         return false
     end
 
+    local function sendSms(phone, text)
+        if not phone or phone == "" then
+            log.info(tname, "empty phone, ignore sms")
+            return false
+        end
+        if not text or text == "" then
+            text = "Fall detected. Please check now."
+        end
+        -- sms 库由固件提供；若该固件未带 sms 库则跳过，不影响打电话
+        if type(sms) ~= "table" or type(sms.send) ~= "function" then
+            log.info(tname, "sms lib not available in this firmware")
+            return false
+        end
+        local ok = sms.send(phone, text)
+        log.info(tname, "sms send", phone, ok)
+        return ok
+    end
+
     local function handleCallStatus(status)
         log.info(tname, "CC_IND", status)
 
@@ -96,6 +114,8 @@ function
 
         if (obj.cmd == "call" or obj.cmd == "fall_alert") and type(obj.phone) == "string" then
             makeCall(obj.phone)
+        elseif obj.cmd == "sms" and type(obj.phone) == "string" then
+            sendSms(obj.phone, obj.text)
         else
             log.info(tname, "unsupported cmd or phone", obj.cmd, obj.phone)
         end
