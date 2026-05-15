@@ -131,6 +131,7 @@ SparkLink-FallDetection/
 - CN: [EdgeImpulse_模型部署全流程_小白指南](docs/04-TinyML模型/EdgeImpulse_模型部署全流程_小白指南.md) — 模型如何一步步部署进 WS63 工程
 - CN: [EdgeImpulse_WS63_部署调试记录_2026-05-07](docs/04-TinyML模型/EdgeImpulse_WS63_部署调试记录_2026-05-07.md)
 - CN: [EdgeImpulse_训练数据全过程_2026-05-07](docs/04-TinyML模型/EdgeImpulse_训练数据全过程_2026-05-07.md)
+- CN: [实时性·可靠性·星闪优势量化分析](docs/06-系统集成/实时性_可靠性_星闪优势量化分析.md) — 系统级实时性 / 可靠性 / SLE 优势量化
 
 ## 远程报警与户外化方案
 
