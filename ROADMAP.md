@@ -28,7 +28,7 @@
 | LiteOS基础 | 任务创建、调度、互斥锁基础 |
 | 交叉编译工具链 | RISC-V 工具链（WS63 为 RISC-V 架构，riscv32-linux-musl-gcc） |
 | C与C++混合编译 | `extern "C"` 的作用，路径配置 |
-| VSCode/Keil配置 | 调试环境搭建 |
+| HiSpark Studio | 海思官方IDE：编辑、menuconfig、编译、烧录、调试一体 |
 
 ### 实践任务
 
@@ -44,6 +44,7 @@
 
 ### 参考文档
 
+- [📄 WS63开发板上手指南](docs/01-环境搭建/WS63开发板上手指南.md)
 - [📄 SDK编译环境配置](docs/01-环境搭建/SDK编译环境配置.md)
 - [📄 C++移植到LiteOS完整指南](docs/01-环境搭建/CPP移植LiteOS.md)
 
