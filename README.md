@@ -49,7 +49,7 @@
 |------|------|------|
 | 阶段一 | 环境搭建与SDK配置 | [📄 查看](docs/01-环境搭建/) |
 | 阶段二 | MPU6050硬件驱动 | [📄 查看](docs/02-硬件驱动/) |
-| 阶段三 | 数据采集与处理 | [📄 查看](docs/03-数据采集/) |
+| 阶段三 | 数据采集与处理 | [📄 查看](datasets/README.md) |
 | 阶段四 | TinyML模型训练与部署 | [📄 查看](docs/04-TinyML模型/) |
 | 阶段五 | SLE/BLE通信协议 | [📄 查看](docs/05-通信协议/) |
 | 阶段六 | 系统集成与优化 | [📄 查看](docs/06-系统集成/) |
@@ -69,27 +69,26 @@
 SparkLink-FallDetection/
 ├── README.md                   # 项目总览（本文件）
 ├── ROADMAP.md                  # 完整学习路线图
+├── .gitignore
 ├── docs/
-│   ├── 日志/                   # 按日期整理的开发日志
 │   ├── 01-环境搭建/             # SDK编译、LiteOS、C++移植
-│   ├── 02-硬件驱动/             # I2C、MPU6050、GPIO配置
-│   ├── 03-数据采集/             # 传感器数据、滑动窗口
+│   ├── 02-硬件驱动/             # MPU6050驱动
 │   ├── 04-TinyML模型/           # Edge Impulse训练与部署
-│   ├── 05-通信协议/             # SLE与BLE原理与实现
-│   └── 06-系统集成/             # 电源管理、任务调度
-├── src/
-│   ├── drivers/mpu6050/         # MPU6050驱动代码
-│   ├── tinyml/model/            # 部署用TinyML模型
-│   ├── communication/
-│   │   ├── sle/                 # 星闪SLE协议实现
-│   │   └── ble/                 # BLE蓝牙实现
-│   └── app/fall_detection/      # 跌倒检测主应用
-├── datasets/                    # 训练数据集
-│   ├── normal.csv
-│   └── fall.csv
-├── models/edge_impulse/         # Edge Impulse导出的模型文件
-└── tools/data_collection/       # 数据采集工具脚本
+│   ├── 05-通信协议/             # SLE与BLE原理
+│   ├── 06-系统集成/             # 通知链路、功耗、远程报警
+│   ├── 日志/                   # 按日期整理的开发日志
+│   └── fall-detect-sle-debug-summary-2026-04-29(.md / -en.md)
+├── datasets/
+│   └── README.md               # 数据集格式与采集规范说明
+└── tools/                       # 远程报警 / 4G拨号脚本
+    ├── fall_alert_backend_demo.py     # Python 告警后端 Demo
+    ├── fall_alert_backend.env.example # 后端环境变量模板
+    ├── V100C_PASTE_THIS_TO_TASK1.lua  # V100C 任务1可直接粘贴脚本
+    ├── v100c_uart_call_task.lua
+    └── v100c_min_call_test.lua
 ```
+
+> 说明：本仓库为**学习与文档仓库**，WS63 工程源码在独立的 SDK 工程中维护，未纳入本仓库。
 
 ---
 
@@ -110,12 +109,13 @@ SparkLink-FallDetection/
 - **2026.05.10** — 形成户外化4G Cat.1/DTU方案，补充V100C/Air780EHV串口JSON触发电话的接入设计
 - **2026.05.11** — 结合银尔达V100C与Air780 API文档，确认外部RXD/TXD使用`UartGetRecChAndDel(1)`并补充小白版DTU原理说明
 - **2026.05.11** — 在WS63工程侧准备`fall_alert_4g_dtu.*`，Board B收到`0x05`后可通过UART1向V100C发送跌倒JSON
+- **2026.05.13** — 完成银尔达V100C/Air780EHV串口拨号联调，跑通「跌倒JSON → UART → 4G电话告警」链路
 
 ---
 
 ## 参考资料
 
-- [海思WS63官方SDK文档]
+- 海思 WS63 官方 SDK 文档（随开发板 SDK 发布）
 - [Edge Impulse官方文档](https://docs.edgeimpulse.com)
 - [SisFall数据集](http://sistemic.udea.edu.co/en/research/projects/sisfall/)
 - [LiteOS开源仓库](https://gitee.com/LiteOS/LiteOS)
@@ -128,6 +128,7 @@ SparkLink-FallDetection/
 - CN: [fall-detect-sle-debug-summary-2026-04-29](docs/fall-detect-sle-debug-summary-2026-04-29.md)
 - EN: [fall-detect-sle-debug-summary-2026-04-29-en](docs/fall-detect-sle-debug-summary-2026-04-29-en.md)
 
+- CN: [EdgeImpulse_模型部署全流程_小白指南](docs/04-TinyML模型/EdgeImpulse_模型部署全流程_小白指南.md) — 模型如何一步步部署进 WS63 工程
 - CN: [EdgeImpulse_WS63_部署调试记录_2026-05-07](docs/04-TinyML模型/EdgeImpulse_WS63_部署调试记录_2026-05-07.md)
 - CN: [EdgeImpulse_训练数据全过程_2026-05-07](docs/04-TinyML模型/EdgeImpulse_训练数据全过程_2026-05-07.md)
 
