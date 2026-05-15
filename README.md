@@ -72,7 +72,7 @@ SparkLink-FallDetection/
 ├── .gitignore
 ├── docs/
 │   ├── 01-环境搭建/             # SDK编译、LiteOS、C++移植
-│   ├── 02-硬件驱动/             # MPU6050驱动
+│   ├── 02-硬件驱动/             # MPU6050驱动、WS2812B灯光报警驱动
 │   ├── 04-TinyML模型/           # Edge Impulse训练与部署
 │   ├── 05-通信协议/             # SLE与BLE原理
 │   ├── 06-系统集成/             # 通知链路、功耗、远程报警
@@ -110,6 +110,7 @@ SparkLink-FallDetection/
 - **2026.05.11** — 结合银尔达V100C与Air780 API文档，确认外部RXD/TXD使用`UartGetRecChAndDel(1)`并补充小白版DTU原理说明
 - **2026.05.11** — 在WS63工程侧准备`fall_alert_4g_dtu.*`，Board B收到`0x05`后可通过UART1向V100C发送跌倒JSON
 - **2026.05.13** — 完成银尔达V100C/Air780EHV串口拨号联调，跑通「跌倒JSON → UART → 4G电话告警」链路
+- **2026.05.15** — 修复WS2812B灯带数据时序失真（颜色错乱/灯珠不亮），改用RISC-V周期计数器+TCXO主频自标定，并将报警闪烁降到2.5Hz
 
 ---
 
