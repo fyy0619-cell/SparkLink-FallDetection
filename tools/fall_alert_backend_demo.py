@@ -16,7 +16,34 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
+
+
+def load_dotenv_if_present() -> None:
+    """Auto-load fall_alert_backend.env from the script's own directory.
+
+    Works across bash / cmd / PowerShell without needing `source` or `for /f`,
+    and tolerates LF or CRLF line endings and UTF-8 comments.
+    Keys already in os.environ are not overwritten — explicit shell vars win.
+    """
+    env_path = Path(__file__).with_name("fall_alert_backend.env")
+    if not env_path.exists():
+        return
+    for raw in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+load_dotenv_if_present()
 
 
 def env_bool(name: str, default: bool) -> bool:
