@@ -1,423 +1,620 @@
-# Edge Impulse 模型部署小白指南
+# Edge Impulse 模型部署全流程（小白指南）
 
-本文面向第一次接触「机器学习模型 + 嵌入式工程」的同学。目标是把一件事讲透：
-
-> 你在 Edge Impulse 网站上训练出来的跌倒检测模型，是怎么**一步一步**变成 WS63 开发板里能跑的代码的？
-
-读完你应该能回答三个问题：
-
-1. Edge Impulse 到底给了我哪些文件，每个文件是干嘛的？
-2. 这些文件是怎么被「塞进」WS63 工程并参与编译的？
-3. 一个传感器数据从产生到被判定为「跌倒」，中间经历了什么？
+> 本文回答 6 个问题，逐节展开：
+> 1. **AI 模型在我这个项目里扮演什么角色？**（不是主判，是复核器）
+> 2. **它是怎么"塞进"WS63 单片机的？**（代码文件清单 + 编译链路）
+> 3. **模型到底多大？**（字节级账本：纯权重 628 字节）
+> 4. **INT8 量化和模型裁剪到底是什么？**（公式 + 你工程里的真实参数）
+> 5. **运行时占多少内存？**（每一块 RAM 都拆开算）
+> 6. **推理延迟多少？瓶颈在哪？怎么继续优化？**
+>
+> 最后一节给"重新训练后怎么更新"的操作清单。
 
 ---
 
-## 0. 先建立几个直觉
-
-在看代码之前，先用大白话把名词解释清楚，否则后面会一直卡。
-
-| 名词 | 大白话解释 |
-| --- | --- |
-| **Edge Impulse（EI）** | 一个在线网站。你上传传感器数据、点几下鼠标，它就帮你训练好一个 AI 模型，并能导出成 C/C++ 代码。 |
-| **模型（Model）** | 一个「数学函数」。喂给它一段传感器数据，它吐出「这是跌倒的概率是 95%」这样的结果。 |
-| **Impulse（脉冲/处理流水线）** | EI 里的专有名词。指「原始数据 → 特征提取(DSP) → 神经网络 → 分类结果」这一整条流水线。不是只有神经网络。 |
-| **DSP（数字信号处理）** | 推理前的「预处理」。原始的 1536 个加速度/角速度数字不会直接喂给神经网络，而是先做频谱分析(FFT)，压缩成 222 个「特征」。 |
-| **推理（Inference）** | 让训练好的模型「跑一次」，给出预测结果。和「训练」相对：训练是学习，推理是使用。 |
-| **TensorFlow Lite Micro（TFLite Micro）** | 谷歌的一个超小型 AI 运行库，专门让神经网络能在单片机这种「内存只有几十 KB」的设备上跑起来。 |
-| **EON Compiler** | EI 的一个优化器。它把神经网络直接「编译成 C++ 代码」，而不是一个需要解析的模型文件，这样更省内存、更快。 |
-| **量化（Quantization）** | 把模型里的 32 位浮点数压成 8 位整数以省内存。**你这个模型没有量化**（用的是 float32），后面会看到。 |
-
-一句话总览：
+## 0. 几个前置直觉
 
 ```text
                 Edge Impulse 网站                          WS63 开发板
    ┌───────────────────────────────────┐      ┌──────────────────────────────────┐
-   │  采集数据 → 设计 Impulse → 训练     │      │  MPU6050 传感器 → 你写的胶水代码   │
-   │         → 导出 C++ library         │ ───▶ │   → Edge Impulse SDK → 出结果      │
+   │  采集数据 → 设计 Impulse → 训练     │      │  MPU6050 → 路径 B 状态机(主判)    │
+   │  导出 INT8 量化 C++ library        │ ───▶ │   → NN 复核(本文档主角)           │
    └───────────────────────────────────┘  拷贝  └──────────────────────────────────┘
-            （在浏览器里完成）              文件        （在单片机里实时运行）
+            （浏览器里完成）                文件     （单片机里实时运行 + 报警）
 ```
 
+| 名词 | 大白话解释 |
+| --- | --- |
+| **Edge Impulse（EI）** | 在线 TinyML 平台。喂数据、点鼠标，导出 C++ 库。 |
+| **Impulse** | EI 专有名词：原始数据 → DSP 特征提取 → 神经网络 → 分类结果 这一整条流水线。 |
+| **DSP（Flatten）** | 你这个模型用的预处理：把 600 样本 × 2 通道 = 1200 个浮点数，压缩成 **14 个统计量**（均值/最值/RMS/标准差/偏度/峰度 等 × 2 通道）。**不是 FFT**。 |
+| **TFLite Micro** | 谷歌为单片机做的小型 AI 推理引擎。 |
+| **EON Compiler** | EI 的优化器，把神经网络"编译成 C++ 代码"而不是模型文件，省去 flatbuffers 解析。 |
+| **INT8 量化** | 把模型里 float32 权重压成 int8 + 一个 scale。**你这个模型已经量化**（与旧版 float32 不同）。详见第 4 节。 |
+
 ---
 
-## 1. 你的模型到底长什么样
+## 1. 角色：AI 不是主判，是"复核器"
 
-所有模型参数都写死在一个自动生成的头文件里：
-`application/samples/my_demo/fall_detect/src/model-parameters/model_metadata.h`
+这是理解整个项目最关键的一点。
 
-把关键参数读出来，做成一张表（你不需要背，知道去哪查就行）：
+你的项目里 **同时跑两套跌倒判定**，结果做"与"：
 
-| 参数（宏名） | 值 | 含义 |
+```text
+                  MPU6050 @200Hz (5ms 节拍)
+                          │
+                          ▼
+   ┌──────────────────────┴──────────────────────┐
+   │                                              │
+   ▼                                              ▼
+┌─────────────────────┐                ┌──────────────────────┐
+│ 路径 B (主判)       │                │ NN (复核)            │
+│ fall_algo.c         │                │ ei_fall.cpp          │
+│                     │                │                      │
+│ 确定性状态机:        │                │ Edge Impulse 模型:    │
+│   失重 → 冲击        │   ──触发──▶    │   14→20→10→2 全连接   │
+│   → 静止 → 倾角      │                │   INT8 量化           │
+│                     │                │   3 秒窗口            │
+└─────────┬───────────┘                └──────────┬───────────┘
+          │ status=1 (序列齐全)                  │ fall%/normal%
+          │                                       │
+          └──────────────┬────────────────────────┘
+                          ▼
+              ┌───────────────────────────┐
+              │ 仲裁(main_task.c):        │
+              │  默认信路径 B,           │
+              │  仅当 NN 高置信度(>=95%)│
+              │  判 normal 才否决报警   │
+              └───────────┬───────────────┘
+                          ▼
+                  星闪/BLE 发 0x05 报警
+```
+
+**为什么这样设计？**
+
+| 角色 | 优点 | 弱点 |
 | --- | --- | --- |
-| `EI_CLASSIFIER_PROJECT_ID` | `985336` | 你的 EI 项目编号 |
-| `EI_CLASSIFIER_PROJECT_NAME` | `"latest_fall"` | 项目名 |
-| `EI_CLASSIFIER_SENSOR` | `SENSOR_FUSION` | 用的是「多传感器融合」 |
-| `EI_CLASSIFIER_FUSION_AXES_STRING` | `accX+accY+accZ+gyrX+gyrY+gyrZ` | 6 个轴：3 轴加速度 + 3 轴角速度 |
-| `EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME` | `6` | 每个采样点有 6 个数 |
-| `EI_CLASSIFIER_RAW_SAMPLE_COUNT` | `256` | 一个「窗口」是 256 个采样点 |
-| `EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE` | `256 × 6 = 1536` | 喂给流水线的原始数字总数 |
-| `EI_CLASSIFIER_FREQUENCY` | `200` | 训练数据是 200 Hz 采的（每秒 200 个采样点） |
-| `EI_CLASSIFIER_INTERVAL_MS` | `5` | 即每 5 ms 一个采样点（1000 / 200） |
-| `EI_CLASSIFIER_NN_INPUT_FRAME_SIZE` | `222` | DSP 之后剩 222 个特征喂给神经网络 |
-| `EI_CLASSIFIER_LABEL_COUNT` | `2` | 2 个类别 |
-| 类别名 | `fall_risk` / `normal` | 「有跌倒风险」/「正常」 |
-| `EI_CLASSIFIER_INFERENCING_ENGINE` | `TFLITE` | 用 TFLite Micro 跑神经网络 |
-| `EI_CLASSIFIER_COMPILED` | `1` | 用了 EON Compiler（编译成 C++ 代码） |
-| `EI_CLASSIFIER_QUANTIZATION_ENABLED` | `0` | **没量化**，是 float32 模型 |
-| `EI_CLASSIFIER_TFLITE_LARGEST_ARENA_SIZE` | `4192` | 神经网络运行时需要的临时内存（约 4 KB） |
+| 路径 B（确定性状态机） | 物理可解释、调参直观、零数据也能跑、对真实硬摔灵敏 | 偶尔会被"快速躺下+静止"骗（误报） |
+| NN（神经网络） | 见过类似动作就能区分 | 训练数据有限，单独信它会漏报 |
+| **B + NN 混合** | B 保证不漏报、NN 帮忙挡误报 | 整体比"只用 NN"安全得多 |
 
-直觉理解：**这个模型每次「看」的是 256 个采样点（约 1.28 秒）的一段动作，6 个轴，判断这 1.28 秒里人是「正常」还是「有跌倒风险」。**
+具体仲裁规则（`main_task.c:245-272`）：
 
-窗口还会被切成 4 片（`EI_CLASSIFIER_SLICES_PER_MODEL_WINDOW = 4`），每片 64 个采样点 —— 这一点在第 6 节讲「滑动窗口」时会用到。
+```c
+} else if (status == 1) {                          // 路径 B 触发了
+    ei_fall_result_t nn = EI_Fall_Classify();      // 让 NN 看看最近 3 秒
+    if (nn.valid && nn.normal_percent >= 95) {     // NN 95%+ 确信是 normal
+        // 否决报警
+    } else {
+        // 报警(包括 NN 同意、NN 不可用、NN 置信度不足)
+    }
+}
+```
+
+阈值 `NN_VETO_NORMAL_PCT = 95` 不是拍脑袋：板上实测**真摔 NN 输出 fall=100%/normal=0%**，偏软的摔约 50/50。设 95 既不会误否决真摔，又能在路径 B 偶尔误触发时挡掉。
+
+> 这种"确定性主判 + ML 复核"是工业 TinyML 系统的常见模式：让 ML 干它最擅长的事（处理"我说不清但你看着像")，不让它干它不擅长的事（保证不漏报、对从未见过的动作鲁棒）。
 
 ---
 
-## 2. 部署涉及的文件分三类
+## 2. 它是怎么"塞进" WS63 的？—— 代码文件清单
 
-打开 `application/samples/my_demo/fall_detect/`，你会看到三类文件。**分清楚谁是谁，是看懂部署的关键。**
+打开 `application/samples/my_demo/fall_detect/`，按"谁是谁"分三类：
 
 ```text
 fall_detect/
-├── CMakeLists.txt          ← 第三类：构建脚本
-├── Kconfig                 ← 第三类：菜单开关
 ├── inc/
-│   ├── ai_model.h          ← 第二类：你写的胶水代码（头文件）
-│   ├── mpu6050.h           ← 第二类：传感器驱动头文件
+│   ├── ei_fall.h          ← 自写：NN 模块的 C 接口
+│   ├── fall_algo.h        ← 自写：路径 B 状态机接口
+│   ├── mpu6050.h          ← 自写：传感器驱动接口
 │   └── ...
 └── src/
-    ├── edge-impulse-sdk/   ← 第一类：EI 导出的（SDK 引擎，别动）
-    ├── model-parameters/   ← 第一类：EI 导出的（模型参数）
-    ├── tflite-model/       ← 第一类：EI 导出的（编译后的神经网络）
-    ├── ai_model.cpp        ← 第二类：你写的胶水代码（核心！）
-    ├── mpu6050.c           ← 第二类：传感器驱动
-    ├── main_task.c         ← 第二类：主循环，把传感器和 AI 串起来
-    └── CMakeLists.txt      ← 第三类：构建脚本
+    ├── edge-impulse-sdk/  ← EI 自动生成（运行引擎，几百个文件，别动）
+    ├── model-parameters/  ← EI 自动生成（模型参数）
+    │   ├── model_metadata.h        ← 一堆宏：窗口大小、量化标志、arena 大小
+    │   └── model_variables.h       ← 关键结构体 impulse_999999_1（"装配图"）
+    ├── tflite-model/      ← EI 自动生成（编译后的神经网络）
+    │   ├── tflite_learn_999999_3_compiled.cpp  ← 28 KB，权重 + EON 编译图
+    │   ├── tflite_learn_999999_3_compiled.h
+    │   └── trained_model_ops_define.h
+    │
+    ├── ei_fall.cpp        ← 自写：NN 推理封装（环形缓冲 + run_classifier 调用）
+    ├── ei_porting_ws63.cpp← 自写：把 EI SDK 适配到 WS63 RISC-V/LiteOS
+    ├── fall_algo.c        ← 自写：路径 B 确定性状态机（主判）
+    ├── mpu6050.c          ← 自写：I2C 驱动
+    ├── main_task.c        ← 自写：采样/推理双任务 + 仲裁 + 报警
+    ├── sle_server_task.c  ← 自写：星闪 SLE 报警链路
+    ├── ws2812b.c          ← 自写：报警灯带
+    └── CMakeLists.txt     ← 把上面所有东西串起来编译
 ```
 
-### 第一类：Edge Impulse 自动导出的（你**不要手改**）
+### 三类文件分别在做什么
 
-从 EI 网站下载的 zip 解压后就这三个文件夹，原样拷进来即可：
+**第一类：EI 自动生成的"素材"**（你不要手改）
 
-| 文件夹 | 里面是什么 | 关键文件 |
+| 目录/文件 | 内容 | 关键点 |
 | --- | --- | --- |
-| `edge-impulse-sdk/` | EI 的「运行引擎」。包含分类器框架、DSP 算法、裁剪版 TensorFlow、CMSIS 数学库、各平台适配层。**几百个文件，是死的库**。 | `classifier/ei_run_classifier.h` |
-| `model-parameters/` | 描述「你这个模型」的参数。 | `model_metadata.h`（宏定义表）、`model_variables.h`（模型结构体） |
-| `tflite-model/` | 你训练出来的**神经网络本体**，已被 EON Compiler 编译成 C++ 代码。 | `tflite_learn_985336_3_compiled.cpp`（373 KB，里面全是权重数字和计算图） |
+| `edge-impulse-sdk/` | EI 的运行引擎：分类器框架、DSP 算子、裁剪版 TensorFlow Lite Micro、各平台 porting 桩 | 几百个 .cpp，CMake 里要剔掉用不上的平台 porting |
+| `model-parameters/model_metadata.h` | 模型的"身份证"：项目 ID、窗口大小、量化是否启用、arena 大小 | 第 3 节会逐行解读 |
+| `model-parameters/model_variables.h` | 全局变量 `impulse_999999_1`，把 DSP/NN/后处理拼装起来 | `EI_Fall_Init()` 里用 `placement new` 显式构造 |
+| `tflite-model/tflite_learn_999999_3_compiled.cpp` | **神经网络本体**：INT8 权重数组 + EON 编译出来的计算图 | 28 KB 文件，但**纯权重只有 628 字节**，详见第 5 节 |
 
-> `model_variables.h` 里有个最重要的结构体 `impulse_985336_1`（约第 162 行）。它像一张「装配图」，把 DSP 配置、数据归一化参数、神经网络入口函数全部组装在一起。后面调用 `run_classifier()` 时，传进去的就是它。
+**第二类：你自己写的 4 个 C/C++ 文件**（部署的真正工作量）
 
-> 你还会看到 `model-parameters.bak_20260507_201051/` 和 `tflite-model.bak_...` 这种带 `.bak` 的文件夹 —— 那是**上一个版本的模型**（项目编号 945439）。每次重新训练换模型，本质就是替换这三个文件夹，旧的备份留着回退用。
+| 文件 | 角色 | 大小 |
+| --- | --- | --- |
+| `ei_fall.cpp` | NN 推理封装：环形缓冲 + 单位换算 + `run_classifier()` 调用 + 结果解析 | 5 KB |
+| `ei_porting_ws63.cpp` | 平台 porting：`ei_malloc/free/printf/timer`，并维护 64 KB 静态内存池 | 4 KB |
+| `fall_algo.c` | 路径 B 主判状态机（IDLE→FREEFALL→IMPACT_WAIT→POST_IMPACT） | 11 KB |
+| `main_task.c` | 200Hz 硬件定时采样 + 推理任务 + B/NN 仲裁 + 星闪报警 | 13 KB |
 
-### 第二类：你自己写的「胶水代码」（部署的真正工作量）
-
-EI 的 SDK 是 C++ 写的，而 WS63 工程主体是 C，并且 EI 默认假设你跑在 Linux/Arduino 上。**把两者粘起来的代码，需要你自己写**：
-
-| 文件 | 作用 |
-| --- | --- |
-| `inc/ai_model.h` | 给 C 代码用的「简化接口」。只暴露 5 个函数，藏掉所有 C++ 细节。 |
-| `src/ai_model.cpp` | **部署的核心**。用 C++ 写，负责内存管理、攒数据、调用 `run_classifier()`、解析结果。 |
-| `src/mpu6050.c` | MPU6050 传感器驱动，通过 I2C 读出 6 轴数据。 |
-| `src/main_task.c` | 主任务循环：读传感器 → 喂给 AI → 拿到结果 → 报警。 |
-
-### 第三类：构建与配置（让编译器认识这些新文件）
+**第三类：编译胶水**
 
 | 文件 | 作用 |
 | --- | --- |
-| `src/CMakeLists.txt` | 告诉 CMake：把这些 .c/.cpp 都编进去，并且要开 C++14、关异常。 |
-| `Kconfig` | 在 `menuconfig` 图形菜单里加一个「是否启用跌倒检测」的开关。 |
+| `CMakeLists.txt` | 收集源码、剔掉用不上的 EI porting（arduino/stm32/...）、强制 C++14 -fno-exceptions -fno-rtti、塞 `EI_CLASSIFIER_ALLOCATION_STATIC=1` 等宏 |
+| `Kconfig` | 在 `menuconfig` 图形菜单里挂"是否启用跌倒检测"开关 |
 
----
+### CMakeLists 的几个关键魔法
 
-## 3. 一步一步部署流程
+`fall_detect/src/CMakeLists.txt` 里 5 件事：
 
-下面是「从零把一个 EI 模型部署进来」的完整步骤。你的工程已经做完了，这里是把**已经发生的事**讲清楚，顺便让你以后能自己复现。
-
-### Step 0 —— 在 Edge Impulse 网站训练并导出
-
-1. 在 EI Studio 里采集数据（戴着 MPU6050 录「正常活动」和「跌倒」两类动作）。
-2. 设计 Impulse：选「Spectral Analysis」做 DSP，选一个分类神经网络。
-3. 训练，看准确率，满意为止。
-4. 进入 **Deployment** 页面，选择 **C++ library**，点 **Build**，下载 zip。
-   - 注意：因为想要 EON Compiler 的省内存效果，导出时勾了「EON Compiler」+「TensorFlow Lite」，所以 `EI_CLASSIFIER_COMPILED = 1`。
-
-> ⚠️ 小白最容易错的地方：**采集训练数据时的传感器量程、采样率、单位，必须和开发板上实际跑的时候一致**。你训练时是 200 Hz、加速度单位是 g，那么板子上也必须是 200 Hz、单位 g。否则模型「看到的世界」和训练时不一样，准确率会崩。这条贯穿后面 Step 4 和 Step 5。
-
-### Step 1 —— 把导出的三个文件夹放进工程
-
-把 zip 里的 `edge-impulse-sdk/`、`model-parameters/`、`tflite-model/` 三个文件夹，整个拷到：
-
-```
-application/samples/my_demo/fall_detect/src/
-```
-
-到这一步，模型的「素材」就进工程了。但它们现在只是一堆躺着的文件，**还不会被编译、也没人调用**。后面 Step 2~6 才是真正的「部署」。
-
-### Step 2 —— 写 C++ 封装 `ai_model.cpp`（核心难点）
-
-这是整个部署最难、最值得细看的一步。文件：`src/ai_model.cpp`，对外接口：`inc/ai_model.h`。
-
-`ai_model.h` 只暴露 5 个 C 函数（注意用 `extern "C"` 包起来，这样 C 代码能调用 C++ 编译出来的函数）：
-
-```c
-void AI_Model_Init(void);                                    // 初始化
-int  AI_Feed_And_Predict_6Axis(float ax,ay,az,gx,gy,gz);     // 喂一个采样点，可能返回结果
-int  AI_Get_Last_Fall_Risk_Percent(void);                    // 取上次「跌倒概率」
-// ...
-```
-
-`ai_model.cpp` 里解决了 4 个嵌入式上的「坑」，逐个看：
-
-#### 坑 1：内存从哪来？——自己造一个内存池
-
-EI 的 SDK 在推理时需要动态申请内存（`malloc`）。但单片机上直接用系统 `malloc` 容易内存碎片、申请失败。解决办法是**自己开一块固定大小的静态内存当「专用内存池」**：
-
-```cpp
-#define AI_POOL_SIZE (40 * 1024)                       // 划 40 KB
-static uint8_t ai_custom_heap[AI_POOL_SIZE];           // 这块内存只给 AI 用
-
-void *ei_malloc(size_t size) { ... LOS_MemAlloc(ai_custom_heap, ...) ... }
-void  ei_free(void *ptr)     { ... LOS_MemFree(ai_custom_heap, ...) ... }
-```
-
-`ei_malloc / ei_calloc / ei_free` 是 EI SDK 规定的「钩子函数」——SDK 内部要内存时就调它们。我们重写这三个函数，让 AI 的所有内存申请都落在 `ai_custom_heap` 这 40 KB 里，和系统内存隔离开。`AI_Model_Init()` 里用 LiteOS 的 `LOS_MemInit()` 把这块池子初始化好。
-
-（代码里还做了 32 字节对齐，因为某些数学运算要求内存地址对齐，这是细节，知道有这回事即可。）
-
-#### 坑 2：C++ 全局对象没人初始化——用 placement new 手动建
-
-EI 生成的 `model_variables.h` 里有个全局对象 `ei_default_impulse`。正常 PC 程序启动时，C++ 运行时会自动「构造」所有全局对象。但 **WS63 开机流程不保证会运行 C++ 全局构造函数**，直接用 `ei_default_impulse` 可能拿到一个没初始化的烂对象。
-
-解决办法（`get_ai_impulse_handle()` 函数）：自己留一块内存，第一次用的时候用「placement new」手动在上面构造对象：
-
-```cpp
-static uint8_t handle_storage[sizeof(ei_impulse_handle_t)];
-new (handle) ei_impulse_handle_t(&impulse_985336_1);   // 手动构造，指向第 1 节说的「装配图」
-```
-
-#### 坑 3：神经网络一次要 256 个采样点——攒一个「滑动窗口」
-
-主循环每次只读到**一个**采样点（6 个数）。但模型一次要 256 个采样点（1536 个数）。所以要先攒够：
-
-```cpp
-static float features_buffer[1536];   // 攒数据的缓冲区
-static int   feature_index = 0;       // 攒到哪了
-```
-
-`AI_Feed_And_Predict_6Axis()` 每次被调用，就把 6 个数塞进 `features_buffer`：
-- 没攒满 1536 个 → 直接返回 `-1`（意思是「还没结果，再喂」）。
-- 攒满了 → 触发一次推理（见坑 4），然后**滑动窗口**：丢掉最旧的 384 个数（`SLIDE_STEP = 64 × 6`），保留后 1152 个，下次只要再攒 384 个就能再推理一次。这样不用每次都从零攒，结果更连续。
-
-#### 坑 4：真正调用模型——`run_classifier()`
-
-窗口攒满后：
-
-```cpp
-signal_t features_signal;
-numpy::signal_from_buffer(features_buffer, 1536, &features_signal);   // 把数组包装成 EI 要的 signal
-ei_impulse_result_t result = {0};
-run_classifier(get_ai_impulse_handle(), &features_signal, &result, false);  // ★ 跑整条流水线
-```
-
-`run_classifier()` 是 EI SDK 的总入口。它内部依次做了：**DSP（频谱分析，1536 个数 → 222 特征） → 标准化（StandardScaler 归一化） → 神经网络推理（222 → 2 个概率） → 输出**。
-
-结果在 `result.classification[]` 里，按类别名取出来：
-
-```cpp
-for (i = 0; i < EI_CLASSIFIER_LABEL_COUNT; i++) {
-    if (strcmp(result.classification[i].label, "fall_risk") == 0)
-        fall_risk_prob = result.classification[i].value;   // 0.0 ~ 1.0
-}
-```
-
-#### 额外一层：物理规则「门控」+ 连续确认（降低误报）
-
-光信任神经网络容易误报（比如快速坐下也可能被判成跌倒）。所以 `ai_model.cpp` 在模型结果之外又加了一道「物理保险」：
-
-- `get_window_motion_stats()` 统计这个窗口里的加速度峰值、自由落体特征、角速度峰值。
-- 只有「神经网络说是跌倒」**且**「物理特征也像跌倒（先失重再撞击 / 剧烈旋转+冲击）」才算数。
-- 还要求**连续 2 个窗口**都满足（`FALL_CONFIRM_WINDOWS = 2`）才最终确认。
-
-这一层不是 EI 给的，是工程里为了实际可用补的业务逻辑。`AI_Feed_And_Predict_6Axis()` 最终返回 `1`（确认跌倒）/ `0`（正常）/ `-1`（窗口还没满）。
-
-### Step 3 —— 改 `CMakeLists.txt` 让编译器接纳这些文件
-
-文件：`src/CMakeLists.txt`。EI 的 SDK 不能直接编译进 WS63，需要几处改动：
-
-1. **收集源码**：`file(GLOB_RECURSE APP_SRCS "*.c" "*.cpp" "*.cc")` —— 递归把所有源码（包括 EI SDK）都收进来。
-2. **剔除不需要的平台适配**：EI SDK 自带 arduino、stm32、mbed 等十几个平台的适配代码，WS63 用不上。CMake 里用 `list(REMOVE_ITEM ...)` 把 `edge-impulse-sdk/porting/` 下 arduino/android/mbed/stm32... 全删掉，**只留 `porting/posix/`**（POSIX 适配在 LiteOS 上能用）。
-3. **切换到 C++14、关掉异常**：EI SDK 是 C++，所以把编译标准从 `gnu99` 换成 `c++14`；又因为单片机不支持 C++ 异常，加 `-fno-exceptions -fno-rtti`。
-4. **加宏定义**强制 EI 用静态内存、关掉用不上的加速库：
+1. **递归收源码** `file(GLOB_RECURSE APP_SRCS "*.c" "*.cpp" "*.cc")`，把 EI SDK 里所有 cpp 都吞进来。
+2. **剔除不用的平台 porting**：EI SDK 自带 arduino / mbed / stm32 / silabs / ti 等十几个平台适配，WS63 用不上。CMake 里 `REMOVE_ITEM` 删掉，**只留 `ei_porting_ws63.cpp`**（注意：连 `posix` 也删了，因为 WS63 的 RISC-V 工具链定义了 `__unix__` 会自动启用 POSIX porting，与 `ei_porting_ws63.cpp` 的 `ei_read_timer_*` 重名冲突）。
+3. **切到 C++14、关异常**：EI SDK 是 C++ 写的，WS63 默认 `gnu99`。CMake 里把 `-std=gnu99` 换成 `-std=c++14`，并加 `-fno-exceptions -fno-rtti -Wno-narrowing`。
+4. **加宏定义**强制 EI 走静态内存、关掉 ARM 专属加速库：
    ```cmake
    add_compile_definitions(
-       EI_CLASSIFIER_ALLOCATION_STATIC=1      # 配合坑 1 的静态内存池
-       EI_CLASSIFIER_TFLITE_ENABLE_CMSIS_NN=0
-       EIDSP_USE_CMSIS_DSP=0)
+       EI_CLASSIFIER_ALLOCATION_STATIC=1     # 走静态内存池，不用 malloc
+       EI_CLASSIFIER_TFLITE_ENABLE_CMSIS_NN=0 # CMSIS 是 ARM 的，RISC-V 用不了
+       EIDSP_USE_CMSIS_DSP=0)                 # 同上
    ```
-5. **加头文件搜索路径**：把 `model-parameters`、`tflite-model` 目录加进 `PUBLIC_HEADER`，否则 `#include "model-parameters/model_metadata.h"` 会找不到。
+5. **加头文件路径**：`model-parameters/` 和 `tflite-model/` 进 `PUBLIC_HEADER`，否则 `#include` 找不到。
 
-### Step 4 —— 传感器驱动 `mpu6050.c`：让真实数据「长得和训练数据一样」
+---
 
-文件：`src/mpu6050.c`。这一步最容易被小白忽略，但**直接决定准确率**。
+## 3. 模型参数账本
 
-`MPU6050_Init()` 里对传感器寄存器的配置，是刻意去**对齐 EI 模型的训练条件**的：
+`model-parameters/model_metadata.h` 是模型的"出厂铭牌"。挑关键宏列出来：
 
-```c
-mpu6050_write_reg(MPU6050_REG_SMPLRT_DIV, 0x04);  // 1kHz/(1+4) = 200 Hz —— 对齐模型的 200 Hz
-mpu6050_write_reg(MPU6050_REG_ACCEL_CFG, 0x08);   // 加速度 ±4 g
-mpu6050_write_reg(MPU6050_REG_GYRO_CFG, 0x08);    // 角速度 ±500 dps
-mpu6050_write_reg(MPU6050_REG_CONFIG, 0x03);      // 低通滤波 ~44 Hz，滤掉抖动毛刺
-```
+| 宏 | 值 | 含义 |
+| --- | --- | --- |
+| `EI_CLASSIFIER_PROJECT_ID` | `999999` | EI 项目编号（旧版是 985336，已替换） |
+| `EI_CLASSIFIER_PROJECT_NAME` | `"fall_ws63_waist"` | 项目名：腰部佩戴版本 |
+| `EI_CLASSIFIER_SENSOR` | `SENSOR_FUSION` | 传感器融合（不是单 IMU） |
+| `EI_CLASSIFIER_FUSION_AXES_STRING` | `"Unnamed 1 + Unnamed 2"` | **2 个通道**：`|acc|` 幅值（milli-g）+ `|gyro|` 幅值（centi-dps） |
+| `EI_CLASSIFIER_RAW_SAMPLE_COUNT` | `600` | 一个窗口 600 个采样点 |
+| `EI_CLASSIFIER_RAW_SAMPLES_PER_FRAME` | `2` | 每帧 2 个数（两个幅值） |
+| `EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE` | `1200` | 窗口总数据量 = 600 × 2 |
+| `EI_CLASSIFIER_FREQUENCY` | `200` | 200 Hz 采样 |
+| `EI_CLASSIFIER_INTERVAL_MS` | `5` | 每 5 ms 一帧 |
+| **窗口时长** | **3 秒** | 600 / 200Hz |
+| `EI_CLASSIFIER_NN_INPUT_FRAME_SIZE` | `14` | DSP 之后只剩 14 个数喂给 NN |
+| `EI_CLASSIFIER_LABEL_COUNT` | `2` | 类别数 |
+| 类别名 | `fall` / `normal` | 注意：旧版叫 `fall_risk/normal`，已改名 |
+| `EI_CLASSIFIER_INFERENCING_ENGINE` | `TFLITE` | TFLite Micro |
+| `EI_CLASSIFIER_COMPILED` | `1` | 走 EON Compiler |
+| **`EI_CLASSIFIER_QUANTIZATION_ENABLED`** | **`1`** | **已量化为 INT8**（旧版是 0） |
+| `EI_CLASSIFIER_TFLITE_INPUT_DATATYPE` | `INT8` | NN 输入：INT8 |
+| `EI_CLASSIFIER_TFLITE_OUTPUT_DATATYPE` | `INT8` | NN 输出：INT8 |
+| `EI_CLASSIFIER_TFLITE_LARGEST_ARENA_SIZE` | `2944` | EI 标注的 arena 上界（实际 EON 编译后只用 **368 字节**，见第 5 节） |
+| `EI_STUDIO_VERSION` | `1.93.3` | EI Studio 版本 |
 
-`MPU6050_Read_Accel_Gyro()` 把传感器读出来的「原始整数」换算成**带物理单位的浮点数**：
+### 模型在做的事，一句话
 
-```c
-*ax = (float)ax_raw / 8192.0f;        // ±4g 量程下，8192 个数 = 1 g  →  得到「g」
-*gx = (float)gx_raw / 65.5f - offset; // ±500dps 量程下，65.5 个数 = 1 dps  →  得到「dps」
-```
+> 「每 5 ms 接收一个 6 轴 IMU 样本（加速度 g、角速度 dps），换算成 `|acc|` 和 `|gyro|` 两个幅值（朝向无关），攒满 600 个（=3 秒）后，过一道 Flatten DSP 压成 14 个统计特征，喂给 14→20→10→2 的 INT8 全连接网络，输出 `fall` / `normal` 两个概率。」
 
-加速度输出单位是 **g**，角速度输出单位是 **dps（度/秒）**。还做了陀螺仪**零偏校准**（开机时静止采 128 次求平均，之后每次读数都减掉这个偏置），消除传感器固有误差。
+### 为什么换成"朝向无关"幅值？
 
-### Step 5 —— 主循环 `main_task.c`：把传感器和 AI 串起来
+旧模型用 6 轴原始值，结果只要传感器戴歪一点就掉精度。换成 `|acc| = √(ax²+ay²+az²)` 和 `|gyro| = √(gx²+gy²+gz²)`，模型看到的世界与传感器朝向解耦，腰间挂得正不正都不影响。代价是丢了方向信息，但跌倒"失重 → 冲击 → 静止"的能量轮廓本来就和方向无关。
 
-文件：`src/main_task.c`。这是「指挥中心」，`Fall_Detect_Task_Body()` 里的死循环就是整个系统的心跳：
-
-```c
-AI_Model_Init();      // 开机各初始化一次
-MPU6050_Init();
-ws2812b_init();
-sle_server_task_init();
-
-while (1) {
-    float ax,ay,az,gx,gy,gz;
-    MPU6050_Read_Accel_Gyro(&ax,&ay,&az,&gx,&gy,&gz);   // ① 读一个采样点
-    int status = AI_Feed_And_Predict_6Axis(ax,ay,az,gx,gy,gz);  // ② 喂给 AI
-    if (status == 1) {                                  // ③ 确认跌倒
-        sle_send_fall_alert(&alert_data, 1);            //    通过星闪发 0x05 报警
-        // 点亮灯带、进入 10 秒冷却...
-    }
-    osDelay(10);                                        // ④ 歇 10 ms 再来
-}
-```
-
-注意一个**单位再加工**的细节，在 `ai_model.cpp` 的 `AI_Feed_And_Predict_6Axis()` 里：
+代码在 `ei_fall.cpp:66-83`：
 
 ```cpp
-clamp_value(gx / GYRO_DPS_TO_MODEL_SCALE, -4.0f, 4.0f)  // GYRO_DPS_TO_MODEL_SCALE = 250
+float acc_mag = sqrtf(ax*ax + ay*ay + az*az) * 1000.0f;   // 单位 milli-g
+float gyr_mag = sqrtf(gx*gx + gy*gy + gz*gz) * 100.0f;    // 单位 centi-dps
+slot[0] = acc_mag;
+slot[1] = gyr_mag;
 ```
 
-角速度 `dps` 还会再除以 250 并裁剪到 ±4 范围 —— 这是为了让喂进模型的数值范围，和 EI 训练时数据的数值范围对得上。**这就是 Step 0 那句警告的落地**：训练和部署的数据必须同一个「尺子」。
+> 量纲要和训练 CSV（`make_features.py` 生成）严格一致，否则"训练/部署量纲不一致"立刻让模型崩。
 
-### Step 6 —— 注册任务 + Kconfig 菜单开关
+---
 
-光有代码还不够，得让系统**启动时真的去跑它**，并且能在配置菜单里开关。
+## 4. INT8 量化和模型裁剪
 
-**注册任务**：`Fall_Detect_Entry()`（`main_task.c:112`）用 `osThreadNew()` 把 `Fall_Detect_Task_Body` 创建成一个 LiteOS 线程。而 `Fall_Detect_Entry()` 本身在系统主入口被直接调用：
+### 4.1 量化是什么
+
+训练时模型用 32 位浮点数（float32）。部署到单片机时把它们压成 8 位整数（int8）。压缩比 **4× 内存 + 大概 3~4× 速度**，代价是几个百分点的精度。
+
+**仿射量化公式（对称/非对称）**：
 
 ```
-application/ws63/ws63_liteos_application/main.c:257  →  Fall_Detect_Entry();
+q = round(r / scale) + zero_point
+r = (q - zero_point) × scale
 ```
 
-**Kconfig 开关链**：WS63 用 `menuconfig` 图形菜单决定编译什么。开关是一层层「套娃」的：
+- `r`：真实浮点数
+- `q`：量化后整数（INT8 范围 -128~127）
+- `scale`：缩放因子（float）
+- `zero_point`：零点偏移（int8，对称量化时为 0）
+
+EI 用的是 **per-tensor affine quantization**：每个张量（权重/激活）独立一组 scale + zero_point。
+
+### 4.2 你模型里的真实量化参数
+
+打开 `tflite_learn_999999_3_compiled.cpp:158-232`，每层的 `quant*_scale / quant*_zero` 都写死了：
+
+| 张量 | 类型 | shape | scale | zero_point | 说明 |
+| --- | --- | --- | --- | --- | --- |
+| 输入 (NN input) | int8 | (1, 14) | 816.97 | -128 | DSP 输出的 14 个特征，**scale 很大**（特征值大，能到 1000+） |
+| W0 权重 | int8 | (20, 14) | 0.00347 | 0 | 输入层权重 |
+| B0 bias | int32 | (20,) | 2.836 | 0 | bias 用 int32 防溢出，scale = 输入 scale × W0 scale |
+| 中间激活 | int8 | (1, 20) | 334.03 | -128 | FC0+ReLU 输出 |
+| W1 权重 | int8 | (10, 20) | 0.00370 | 0 | 隐藏层权重 |
+| B1 bias | int32 | (10,) | 1.236 | 0 | |
+| 中间激活 | int8 | (1, 10) | 168.12 | -128 | FC1+ReLU 输出 |
+| W2 权重 | int8 | (2, 10) | 0.00533 | 0 | 输出层权重 |
+| B2 bias | int32 | (2,) | 0.896 | 0 | |
+| Softmax 前激活 | int8 | (1, 2) | 66.08 | 127 | |
+| **Softmax 输出** | **int8** | **(1, 2)** | **0.00390625** | **-128** | **标准 INT8 softmax 输出，0.00390625 = 1/256** |
+
+读 `result.classification[i].value` 时（`ei_fall.cpp:128-137`），SDK 已经做完反量化，给的是 0.0~1.0 的浮点概率。
+
+### 4.3 模型裁剪（架构裁剪）
+
+「裁剪」可以是两件事：
+- **结构裁剪**：网络层数/神经元减少
+- **稀疏化**（pruning）：把小权重置 0
+
+你这个模型走的是**极致结构裁剪**。看 `tflite_learn_999999_3_compiled.cpp:233-244`：
 
 ```text
-SAMPLES_ENABLE
-  └─ ENABLE_MY_DEMO_SAMPLE          (application/samples/Kconfig)
-       └─ SAMPLE_SUPPORT_FALL_DETECT (application/samples/my_demo/Kconfig)
-            └─ ENABLE_FALL_DETECT_APP        (fall_detect/Kconfig)
-                 ├─ FALL_DETECT_USE_SLE      ← 选星闪还是蓝牙
-                 └─ FALL_DETECT_ROLE_SERVER / _CLIENT  ← 这块板子是「采集+AI」还是「接收」
-```
-
-CMake 这边对应地用 `if(DEFINED CONFIG_ENABLE_MY_DEMO_SAMPLE)` 决定要不要 `add_subdirectory(my_demo)`，一层层往下走，最终 `fall_detect/src/CMakeLists.txt` 把所有源码交给底层。
-
-### Step 7 —— 编译并烧录
-
-配置好 menuconfig 后，用工程的 `build.py` 编译，生成固件，烧进 WS63。开机串口会打印：
-
-```
-[AI] model ready: 256 samples, 6 axes, 200 Hz, interval=5 ms
-[MPU6050] cfg: accel=+/-4g gyro=+/-500dps dlpf=44Hz sample=200Hz ...
-[AI] collecting window: 120/256 samples ...      ← 正在攒窗口
-[AI] status=normal ai_fall=2% normal=98% ...     ← 推理出结果了
-```
-
-看到这些日志，就说明模型已经成功在板子上跑起来了。
-
----
-
-## 4. 追踪一个数据的完整旅程
-
-把前面所有步骤连起来，跟踪「一个传感器读数」从产生到「报警」的全过程：
-
-```text
-①  MPU6050 芯片内部以 200 Hz 采样
-        │  I2C 读寄存器 0x3B 起共 14 字节
-        ▼
-②  mpu6050.c：原始整数 → 物理单位
-        ax=0.98g  ay=-0.03g  az=0.12g  gx=5.2dps ...
-        │  main_task.c 循环调用
-        ▼
-③  ai_model.cpp：单位再缩放 + 裁剪
-        gx/250 → 0.02 ，clamp 到 ±4
-        │  存进 features_buffer[]
-        ▼
-④  攒窗口：不到 1536 个数 → 返回 -1（继续喂）
-        │  攒满 256 个采样点
-        ▼
-⑤  run_classifier()  ┌─ DSP：频谱分析 FFT，1536 → 222 个特征
-                      ├─ 归一化：StandardScaler（减均值、除标准差）
-                      └─ 神经网络：222 → 2 个概率
-        │  result.classification[] = { fall_risk:0.91, normal:0.09 }
-        ▼
-⑥  阈值判断：fall_risk 91% ≥ 80%  →  模型认为是跌倒
+┌────────────┐     FullyConnected + ReLU      ┌────────────┐
+│ INT8 [1,14]├──────────────────────────────▶ │ INT8 [1,20]│
+└────────────┘  W0(20×14)+b0(20)              └────────────┘
+                                                     │
+                                                     ▼  FullyConnected + ReLU
+┌────────────┐                                ┌────────────┐
+│ INT8 [1,10]│◀──── W1(10×20)+b1(10) ────────│ INT8 [1,20]│
+└────────────┘                                └────────────┘
         │
-        ▼
-⑦  物理门控：加速度峰值/自由落体/旋转 也都像跌倒？  → 是
-        │
-        ▼
-⑧  连续确认：连续 2 个窗口都满足？  → 是  →  返回 1
-        │
-        ▼
-⑨  main_task.c：status==1  →  星闪发 0x05  →  另一块板子报警
-        │  随后进入 10 秒冷却，避免连环触发
-        ▼
-   滑动窗口：丢掉最旧 384 个数，回到 ④ 继续
+        ▼  FullyConnected (no activation)
+┌────────────┐                                ┌────────────┐
+│ INT8 [1,2] ├───────── Softmax ────────────▶│ INT8 [1,2] │
+└────────────┘                                └────────────┘
+   logits                                       概率 (×1/256)
 ```
 
----
+总参数数：
 
-## 5. 以后重新训练了，怎么更新模型？
+| 层 | 权重 | bias | 小计 |
+| --- | --- | --- | --- |
+| FC0 | 14×20 = 280 | 20 | 300 |
+| FC1 | 20×10 = 200 | 10 | 210 |
+| FC2 | 10×2 = 20 | 2 | 22 |
+| **总参数** | | | **532 个数** |
 
-这是最实用的一节。当你在 EI 上采了新数据、重新训练后：
+INT8 权重 + INT32 bias 的字节占用：
 
-1. EI 网站 → Deployment → **C++ library** → Build → 下载新的 zip。
-2. 解压，得到新的 `edge-impulse-sdk/`、`model-parameters/`、`tflite-model/`。
-3. 把工程里**这三个文件夹整体替换**掉（建议先把旧的改名成 `xxx.bak_日期` 备份，工程里已经有这种备份就是这么来的）。
-4. **检查类别名有没有变**：如果新模型的类别不再叫 `fall_risk` / `normal`，要去 `ai_model.cpp` 第 211~217 行同步改 `strcmp(...)` 里的字符串。
-5. **检查窗口参数有没有变**：`ai_model.cpp` 用的 `EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE`、`RAW_SAMPLES_PER_FRAME` 都是宏，会随新 `model_metadata.h` 自动更新，一般不用手改。
-6. 重新编译烧录。
+| 张量 | 字节 |
+| --- | --- |
+| W0 (20×14 int8) | 280 |
+| B0 (20 int32) | 80 |
+| W1 (10×20 int8) | 200 |
+| B1 (10 int32) | 40 |
+| W2 (2×10 int8) | 20 |
+| B2 (2 int32) | 8 |
+| **纯参数总量** | **628 字节** |
 
-> 关键认知：**第二类「胶水代码」（ai_model.cpp / mpu6050.c / main_task.c）通常不用动，只换第一类的三个文件夹**。这就是为什么第 2 节要花力气把文件分清楚——它决定了你以后改东西时该动哪、不该动哪。
+**也就是你这个模型的"骨头"只有 0.6 KB**。
 
----
+### 4.4 那 28 KB 的 .cpp 文件里装了什么？
 
-## 6. 小白常见坑总结
+`tflite_learn_999999_3_compiled.cpp` 文件大小 28705 字节。但纯权重才 628 字节，其余 ~28 KB 是：
 
-| 现象 | 原因 | 怎么查 |
+| 内容 | 估算 | 说明 |
 | --- | --- | --- |
-| 模型一直不出结果，只打印 `collecting window` | 窗口还没攒满 256 个采样点，正常现象，等 1~2 秒 | 看 `[AI] collecting window` 的进度 |
-| 准确率很差，乱报警 | 部署时的采样率/量程/单位和 EI 训练时不一致 | 对照 Step 4：200 Hz、±4g、±500dps、单位 g/dps |
-| 编译报 C++ 异常相关链接错误 | 没加 `-fno-exceptions -fno-rtti` | 见 Step 3 的 CMakeLists 改动 |
-| 编译报 `model_metadata.h` 找不到 | 头文件搜索路径没加 | 见 Step 3 第 5 点 |
-| `[AI] OOM` 内存不足 | 40 KB 内存池不够 | 调大 `ai_model.cpp` 的 `AI_POOL_SIZE` |
-| 改了模型后类别对不上、概率永远是 0 | 新模型类别名变了，`strcmp` 没同步 | 见第 5 节第 4 点 |
-| 模型结果对，但实际没报警 | 卡在物理门控或连续确认 | 看串口 `gate=NO` 或 `confirm=1/2` |
+| EON Compiler 生成的接入代码 | ~15 KB | `tflite_learn_999999_3_init/invoke/input/output/reset` 等函数体，把 4 个算子手工拼成一个计算图 |
+| Tensor 元数据 + Quantization 参数 struct | ~5 KB | 每张量一组 `TfArray<scale>`、`TfArray<zero_point>`、`TfLiteAffineQuantization`、`tensor_dimension*` |
+| Op resolver 和 registrations | ~3 KB | 把 `FullyConnected`、`Softmax` 算子注册进 TFLite Micro |
+| 注释 + 头文件 + 代码缩进格式 | ~5 KB | C++ 源码的"白纸"开销 |
+
+**核心认识**：模型本身（权重 + 结构）极小，**编译后的 .cpp 文件 ≠ 模型大小**。真正烧进 Flash 的、和"模型"对应的，是这 628 字节的常量数组 + 几 KB 的计算图代码。
+
+> 旧版（float32 + 旧架构）这个 cpp 文件 373 KB，新版（INT8 + 14→20→10→2）只有 28 KB。**13× 缩小**主要来自架构裁剪（旧模型 NN 输入 222 维，新模型只有 14 维），其次才是 INT8 量化的 4× 收益。
 
 ---
 
-## 7. 一句话回顾
+## 5. 内存账本 —— 每一块 RAM 都拆开算
 
-> Edge Impulse 帮你把「训练好的模型」打包成三个文件夹（SDK 引擎 + 模型参数 + 编译后的神经网络）。
-> 部署的真正工作，是写一层 **C++ 胶水代码**（`ai_model.cpp`）：管好内存、攒够一个窗口的数据、调用 `run_classifier()`、解析概率；
-> 再配好**构建脚本**让它能编译、配好 **Kconfig** 让它能开关、配好**传感器驱动**让真实数据和训练数据同一把尺子；
-> 最后在**主循环**里把「读传感器 → 喂 AI → 报警」串成一个永远运行的心跳。
+这是用户最关心的问题之一。把整个跌倒检测系统占的 RAM 拆开看：
+
+### 5.1 编译时分配（.data / .bss）
+
+| 区块 | 位置 | 大小 | 来源 |
+| --- | --- | --- | --- |
+| EI 静态内存池 `g_ei_heap` | `.bss` (RAM) | **64 KB** | `ei_porting_ws63.cpp:30` |
+| NN 环形缓冲 `g_ring` | `.bss` (RAM) | **4800 B** | `ei_fall.cpp:41` (1200 floats) |
+| NN 推理窗口 `g_window` | `.bss` (RAM) | **4800 B** | `ei_fall.cpp:46` (1200 floats) |
+| impulse handle 占位 `g_handle_storage` | `.bss` | ~32 B | `ei_fall.cpp:50` |
+| **模型权重（const）** | **`.rodata` (Flash)** | **628 B** | `tflite_learn_..._compiled.cpp` |
+| Tensor 元数据 / quant scale / op registrations | `.rodata` (Flash) | ~10 KB | 同上 |
+| **小计（RAM）** | | **~73.7 KB** | |
+| **小计（Flash）** | | **~11 KB** | |
+
+### 5.2 运行时动态分配（在 `g_ei_heap` 这 64 KB 池子内）
+
+`run_classifier()` 跑起来后，`ei_malloc` 会临时申请几块：
+
+| 临时块 | 估算大小 | 用途 |
+| --- | --- | --- |
+| **tensor_arena** | **368 B** | 4 个算子的输入/输出/中间激活，复用 |
+| Flatten DSP 矩阵 | ~14 KB | 把 (600,2) reshape 成 (2,600) 计算 7 个统计量 |
+| scratch buffer 上限 | ~几 KB | TFLite Micro 算子内部 scratch |
+| 对齐 + 池子碎片余量 | ~46 KB | 64 KB - 上面已用 ≈ 留作缓冲 |
+
+> **关键发现**：`model_metadata.h` 里 `EI_CLASSIFIER_TFLITE_LARGEST_ARENA_SIZE = 2944` 是 EI 给的"保守上界"。但看 `tflite_learn_999999_3_compiled.cpp:99`：
+> ```cpp
+> constexpr int kTensorArenaSize = 368;
+> ```
+> EON Compiler 编译后**实际只用 368 字节** arena！因为 EON 已经预先做了张量内存复用（看那些 `tensor_arena + 0/16/32` 偏移就是手工排好的）。
+
+### 5.3 任务栈
+
+| 任务 | 栈大小 | 来源 | 优先级 |
+| --- | --- | --- | --- |
+| `FallTask`（仲裁 + 推理 + 报警） | **32 KB** | `main_task.c:326` | Normal |
+| `ImuSampler`（5 ms 节拍读 I2C） | **4 KB** | `main_task.c:57` | AboveNormal |
+| **栈小计** | **36 KB** | | |
+
+### 5.4 进程间通信
+
+| 对象 | 大小 |
+| --- | --- |
+| `g_imu_queue`（IMU 样本队列）= 128 × `sizeof(imu_sample_t)`(24B) | **3 KB** |
+| `g_tick_sem`（节拍信号量） | <100 B |
+
+### 5.5 总账
+
+```text
+┌────────────────────────────────────────────────────────────┐
+│  WS63 上跌倒检测的 RAM 占用                                │
+├────────────────────────────────────────────────────────────┤
+│  EI 内存池 g_ei_heap                          64 KB        │
+│    └─ run_classifier 时分到:                              │
+│         tensor_arena                  368 B               │
+│         DSP Flatten 临时矩阵         ~14 KB              │
+│         其余对齐 + 碎片余量          ~50 KB              │
+│                                                            │
+│  NN 环形缓冲 g_ring (1200 floats)              4.7 KB     │
+│  NN 推理窗口 g_window (1200 floats)            4.7 KB     │
+│                                                            │
+│  FallTask 栈                                   32 KB      │
+│  ImuSampler 栈                                  4 KB      │
+│                                                            │
+│  IMU 样本队列                                    3 KB     │
+│  其它（信号量/句柄）                            <1 KB     │
+├────────────────────────────────────────────────────────────┤
+│  小计 RAM                                    ~113 KB      │
+└────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────┐
+│  Flash 占用（模型相关，不含 EI SDK 引擎）                  │
+├────────────────────────────────────────────────────────────┤
+│  纯权重 + bias                              628 B         │
+│  Tensor 元数据 / quant scale / EON 计算图   ~10 KB        │
+│  自写 C/C++ 代码（ei_fall + porting + algo  ~33 KB        │
+│       + main_task + mpu6050 + sle/ws2812）                │
+│  EI SDK 库代码（裁剪后）                     几百 KB      │
+└────────────────────────────────────────────────────────────┘
+```
+
+> WS63 总 SRAM 是 384 KB。AI 相关占 113 KB ≈ 30%，留给 LiteOS 内核 + 星闪协议栈 + 其它任务还有充足空间。
+
+### 5.6 如果想再压 RAM
+
+**最大的可压目标是 `g_ei_heap = 64 KB`**。实测最大单次需求是 DSP 临时矩阵 ~14 KB + 抗碎片余量。可以压到 **24~32 KB**。压的方法：
+
+```cpp
+// ei_porting_ws63.cpp:26
+#define EI_WS63_HEAP_SIZE   (32 * 1024)   // 从 64 KB 压到 32 KB
+```
+
+风险：DSP 算子内部可能在不同帧分配大小不同，压得太狠会 OOM。串口日志里盯 `[EI] OOM: request N bytes`，如果出现就调回去。
+
+---
+
+## 6. 推理延迟与瓶颈
+
+### 6.1 系统两个时间尺度
+
+```text
+连续每 5 ms 一次:        采样 → 路径 B 状态机一步 → 状态监控统计
+不连续, 触发时一次:      run_classifier()  (DSP + NN + 后处理)
+                         |
+                         └─ 路径 B 完成"失重-冲击-静止"序列才触发
+                            ⇒ 一次跌倒生命周期内只跑 1 次
+```
+
+### 6.2 一次 `run_classifier()` 估算耗时
+
+| 阶段 | 计算量 | 估算 |
+| --- | --- | --- |
+| DSP Flatten | 遍历 1200 floats × 计算 7 个统计量（mean/min/max/RMS/stdev/skew/kurt）× 2 通道 = 14 次 reduce | **5~15 ms** （含 sqrt/pow） |
+| NN 推理 | INT8 MAC = 14×20 + 20×10 + 10×2 = **500 次乘加** + ReLU + Softmax | **<1 ms** |
+| 拼装 result 结构 + ei_printf | 拷贝 + 反量化 + 串口打印 | <1 ms |
+| **单次推理总耗时** | | **~10 ms 量级** |
+
+> NN 部分极便宜，500 次 INT8 MAC 在 RISC-V @160MHz 上算下来几十微秒级。**瓶颈 100% 在 DSP**。
+
+### 6.3 真正的瓶颈在哪？
+
+按"系统总采样节拍"看：
+
+| 候选瓶颈 | 实测/估算开销 | 是否瓶颈 |
+| --- | --- | --- |
+| MPU6050 I2C 读 14 字节 @400kHz | ~700 µs | ⭐ 占 5ms 周期的 14% |
+| 路径 B 状态机一帧 | <100 µs | 否 |
+| `run_classifier` 推理 | 10~20 ms（一次跌倒触发一次） | ⭐ 触发时 |
+| 串口打印 `[Monitor]` | 一次 1~2 ms（每秒一次） | 否 |
+| 系统调度抖动 | 几十 µs | 否 |
+
+**关键设计：推理被故意做成"事件触发"**——只在路径 B 状态机走完"失重 → 冲击 → 静止"序列才跑一次。这样即使单次推理要 15 ms，也不会拖慢每 5 ms 的采样节拍。
+
+推理期间采样怎么办？看 `main_task.c:74-109`：
+- 采样任务（高优先级 `AboveNormal`）继续被 5 ms 硬件 timer 唤醒，读 I2C，把样本压入 128 深度的 `g_imu_queue`。
+- 推理任务（`Normal` 优先级）正在跑 `run_classifier`，从队列里慢慢吃。
+- 15 ms 推理期间 ≈ 3 个采样积压，128 深度的队列绰绰有余。
+- 实测 `g_drop_count` 恒为 0（永不丢样本）。
+
+### 6.4 优化路线（按 ROI 排序）
+
+| 优化点 | 收益 | 难度 | 建议 |
+| --- | --- | --- | --- |
+| **量化已开 INT8** | 4× 内存 + 3~4× 速度 | ✅ 已完成 | — |
+| **结构已极致裁剪** 14→20→10→2 | 模型从几十 KB 缩到 0.6 KB | ✅ 已完成 | 再裁意义不大 |
+| **EON Compiler** | 省去 flatbuffers 解析、tensor_arena 自动复用到 368 B | ✅ 已启用 | — |
+| `g_ei_heap` 64KB → 32KB | 省 32 KB RAM | 🟢 简单 | 改一行宏，串口盯 OOM |
+| Flatten DSP 改手写 Welford 单遍统计 | DSP 5~15 ms → 2~3 ms | 🟡 中等 | 一次遍历同时算 mean/var/min/max/skew/kurt |
+| 推理优先级降低、不阻塞采样 | 已经做了 | ✅ 已完成 | — |
+| 用更高量化（INT4 / 二值化） | 更省 | 🔴 难 | 当前模型已经够小，不必 |
+| 训练数据扩充 / 模型重训 | 提升 NN 真正区分能力 | 🟡 中等 | **当前 ROI 最高的方向**：模型小不是问题，"会不会判"才是 |
+| 加 CMSIS-NN 加速 | 3~10× NN 加速 | 🔴 不适用 | CMSIS 是 ARM 的，WS63 是 RISC-V，不能直接用 |
+| 换 NPU 平台 | 100× NN 加速 | 🔴 换板 | WS63 没 NPU；如果未来上 BES 系列或带 NPU 的 SoC 再说 |
+
+> **结论**：从计算角度，这套系统已经在 WS63 这级 MCU 上做到接近极致的工程化。后续投入应该转向**数据**（采更多真摔/疑似动作样本，重训 NN），而不是继续抠 ML 流水线的字节和毫秒。
+
+---
+
+## 7. 一帧数据的完整旅程（端到端）
+
+把前 6 节串起来，跟踪一帧 IMU 数据：
+
+```text
+① MPU6050 内部 1kHz / DLPF44Hz / ±16g / ±2000dps
+        │  WS63 硬件 timer 1 每 5 ms 中断 → sample_timer_cb → 释放 g_tick_sem
+        ▼
+② ImuSampler 任务（AboveNormal 优先级）
+   I2C 读 0x3B 起 14 字节 → 换算物理单位（g, dps）→ 入 g_imu_queue
+        │  (~700 µs)
+        ▼
+③ FallTask 主循环（Normal 优先级）从队列拿到样本
+        │
+        ├─▶ EI_Fall_Push():  acc_mag = √(ax²+ay²+az²)·1000  → g_ring[head][0]
+        │                    gyr_mag = √(gx²+gy²+gz²)·100   → g_ring[head][1]
+        │                    head++  (环形缓冲始终持有最近 600 样本 = 3 秒)
+        │
+        ├─▶ 状态监控统计累计 |acc| min/max, |gyro| peak
+        │
+        └─▶ Fall_Algo_Process(ax,ay,az,gx,gy,gz):  路径 B 状态机一步
+                IDLE → FREEFALL → IMPACT_WAIT → POST_IMPACT
+                |
+                └─ 完整序列齐全(失重+硬冲击+静止+躯干倾倒) → 返回 1
+                              │
+                              ▼
+④ NN 复核（仅在路径 B 触发后）：EI_Fall_Classify()
+        ┌── 把 g_ring 按时间顺序展开到 g_window（环形 → 连续）
+        ├── numpy::signal_from_buffer(g_window, 1200, &signal)
+        ├── run_classifier(handle, &signal, &result, false):
+        │     ┌─ DSP Flatten: 1200 floats → 14 个统计特征
+        │     │    (mean/min/max/RMS/stdev/skew/kurt × 2 通道)
+        │     ├─ 量化输入: float → int8 (scale=816.97, zp=-128)
+        │     ├─ FC0+ReLU: int8 [14] → int8 [20]  (W0 280B, B0 80B)
+        │     ├─ FC1+ReLU: int8 [20] → int8 [10]  (W1 200B, B1 40B)
+        │     ├─ FC2:       int8 [10] → int8 [2]   (W2 20B,  B2 8B)
+        │     ├─ Softmax:   int8 [2] → int8 [2]    (scale=1/256, zp=-128)
+        │     └─ 反量化输出: int8 → float 概率 [0..1]
+        └── 解析 result.classification[i].label == "fall" / "normal"
+            打印 [EI] NN result: fall=X% normal=Y%
+        │  耗时 ~10 ms
+        ▼
+⑤ 仲裁（main_task.c:251-272）
+   if (nn.valid && nn.normal_percent >= 95)  否决报警 ([Hybrid] B triggered, NN veto)
+   else                                        触发报警 ([Hybrid] B+NN agree)
+        │
+        ▼
+⑥ 报警（仅在仲裁通过时）
+   ┌─ 星闪 SLE: sle_send_fall_alert(&payload, 1)  → 0x05 字节通知客户端
+   ├─ WS2812B 灯带常亮 10 秒
+   └─ 进入 3 秒报警冷却（避免抖动二次触发）
+```
+
+---
+
+## 8. 模型重训后怎么更新？
+
+EI Studio 重新训练并 Build → `C++ library`（勾 EON Compiler + TensorFlow Lite）→ 下载 zip。
+
+**8.1 必改 / 自动同步项目矩阵**
+
+| 项 | 是否需要手改 | 在哪 |
+| --- | --- | --- |
+| `edge-impulse-sdk/` | 否，整体替换 | 直接覆盖目录 |
+| `model-parameters/` | 否，整体替换 | 直接覆盖目录 |
+| `tflite-model/` | 否，整体替换 | 直接覆盖目录（注意：编译后的 .cpp 文件名里带 project_id，要在 `model_variables.h` 里同步 include） |
+| `impulse_999999_1` 这个全局变量名 | 是 | `ei_fall.cpp:59` `new (g_handle) ei_impulse_handle_t(&impulse_999999_1);` 要改成新 project_id |
+| 类别名 `"fall"` / `"normal"` | 是（如果改名） | `ei_fall.cpp:133, 135` |
+| 量纲（milli-g, centi-dps） | 是（如果训练 CSV 用了别的单位） | `ei_fall.cpp:37-38, 72-73` |
+| 量化是否启用、INT8 vs float32 | 否，SDK 自适应 | `model_metadata.h` 中宏会自动切换 |
+
+**8.2 标准更新流程**
+
+```bash
+# 1. 把旧的三个文件夹改名备份
+mv edge-impulse-sdk    edge-impulse-sdk.bak_$(date +%Y%m%d)
+mv model-parameters    model-parameters.bak_$(date +%Y%m%d)
+mv tflite-model        tflite-model.bak_$(date +%Y%m%d)
+
+# 2. 解压 EI 下载的 zip，三个新目录拷进来
+unzip -d . ei-export-fall-vN.zip
+
+# 3. 改 ei_fall.cpp 的 project_id 引用
+#    (vim ei_fall.cpp，把 impulse_999999_1 改成新 project_id)
+
+# 4. 重新 menuconfig（无需改）+ build.py
+python build.py
+```
+
+**8.3 怎么验证新模型在板上跑通**
+
+开机串口应出现：
+
+```
+[EI] NN ready: 600 samples x 2 axes @ 200 Hz, window=1200 floats
+[MPU6050] cfg: accel=+/-16g gyro=+/-2000dps dlpf=44Hz sample=200Hz ...
+[Sample] 200Hz hardware-timed sampling started
+[Monitor] B=IDLE acc=0.99~1.01G gyr_peak=2 dps q=0/128 drops=0
+```
+
+模拟跌倒（搬起板子做"失重→拍桌→静止"动作）应看到：
+
+```
+[Fall] freefall 38 samples, waiting for impact...
+[Fall] impact detected, checking stillness...
+[Fall] CONFIRMED (impact 5.43G, tilt 87 deg, ffmin 0.21G, still 89%)
+[EI] NN result: fall=98% normal=2%
+[Hybrid] B+NN agree (fall=98% normal=2%)
+[Alert] Fall Detected. Sending SOS now...
+```
+
+---
+
+## 9. 常见小白坑
+
+| 现象 | 根因 | 解 |
+| --- | --- | --- |
+| `[EI] window not full (xxx/600), skip NN` | 路径 B 在开机不到 3 秒就触发，环形缓冲还没攒满 600 | 正常，等 3 秒后路径 B 再触发 |
+| 准确率差，乱报警 | 部署的采样率/量程/单位和 EI 训练数据不一致 | 对照第 3 节核查：200 Hz、±16g、±2000dps、`|acc|` milli-g、`|gyro|` centi-dps |
+| `[EI] OOM: request N bytes` | `g_ei_heap` 64 KB 不够 | 把 `EI_WS63_HEAP_SIZE` 调回 64 KB；或继续排查泄漏 |
+| 编译报 `-Wnarrowing` 错 | `model_variables.h` 里整数字面量被 `-Werror` 升级成错误 | `ei_fall.cpp:26-31` 已用 `#pragma GCC diagnostic` 局部抑制 |
+| 编译报"找不到 `model_metadata.h`" | CMake 没把 `model-parameters/` 加进 `PUBLIC_HEADER` | 看 `CMakeLists.txt:88` |
+| 路径 B 触发但 NN 总输出 `normal=100%` | 类别名或量纲与训练数据不符 | 串口看 `[EI] NN result: ...`，对照 8.1 |
+| `[Hybrid] B triggered, NN veto: alert suppressed` | NN 否决了报警 | 如果是误否决，把训练数据补上、重训；如果误触发被正确否决，不用动 |
+| 模型改了字段名，编译过但运行崩 | `ei_fall.cpp` 里 `impulse_999999_1` 没同步改 | 见 8.1 |
+
+---
+
+## 10. 一句话回顾
+
+> **AI 不是这个项目的主判，是复核器**：路径 B（确定性状态机）保证不漏报，NN（INT8 量化的 14→20→10→2 全连接网络）帮忙挡误报。模型本体只有 **628 字节权重 + 368 字节 arena**，跑一次推理约 10 ms，被设计成"事件触发"避开每 5 ms 的采样节拍。整个 AI 部分占 WS63 大概 30% 的 SRAM。接下来要再压模型已经没什么收益，重心应该转到训练数据扩充和重训。
