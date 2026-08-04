@@ -46,6 +46,45 @@ ticks = 时间(us) × (时钟频率 / 1,000,000)
 
 本项目分工：**硬件 timer 1 专门用于 200Hz 采样节拍。**
 
+### 中断与中断号（为什么 `uapi_timer_adapter` 要传中断号）
+
+调 `uapi_timer_adapter(index, TIMER_x_IRQN, prio)` 时那个 `TIMER_x_IRQN` 是**中断号**，这里讲清它是什么、为什么必须有。
+
+**① 什么是中断，定时器为什么离不开它**
+定时器在硬件里**自己数数**（不占 CPU）。数到 0 那一刻，它得**通知 CPU"时间到了"**，CPU 才好跳去跑你的回调——这个"通知"就是**发一个中断**。
+没有中断，CPU 要么傻等/不停轮询计数器（浪费 CPU），要么永远不知道到点了。所以**定时器必须靠中断**来主动通知 CPU。
+
+**② 中断"号"是干什么的**
+芯片里能发中断的东西很多：timer0/1/2、UART、GPIO、I2C… 几十个，都走 CPU 同一套中断机制。
+问题：中断来了，CPU 怎么知道是谁发的？→ **给每个中断源分配一个唯一编号 = 中断号（IRQ number）**。
+```c
+// drivers/chips/ws63/include/chip_core_irq.h
+TIMER_0_IRQN = LOCAL_INTERRUPT0 + 0,   // timer0 的中断号
+TIMER_1_IRQN = LOCAL_INTERRUPT0 + 1,   // timer1 的中断号
+TIMER_2_IRQN = LOCAL_INTERRUPT0 + 2,   // timer2 的中断号
+```
+> 类比：酒店前台（中断控制器）管很多房间（外设），每个房间有**房间号**。202 房按呼叫铃，前台一看"是 202 号"就知道派谁去。**房间号=中断号**，用来区分是谁在呼叫。
+
+**③ adapter 传中断号 = 登记"这个号归谁处理"**
+```c
+uapi_timer_adapter(2, TIMER_2_IRQN, 1);
+//                 定时器2  它的中断号  优先级
+```
+这句在登记："**中断号 `TIMER_2_IRQN` 一旦触发，就是 timer2 的中断，交给定时器驱动处理**。" 有了它，中断才能被正确路由到你的回调：
+```
+硬件timer2数到0 → 拉起中断号 TIMER_2_IRQN
+   → 中断控制器识别"TIMER_2_IRQN 归timer驱动"(adapter登记的)
+   → 进驱动内部ISR timer_int_callback
+   → 调你的回调 hello_timer_cb
+```
+**中断号就是这条通知链的"地址标签"。**
+
+**④ 号必须和定时器 index 对上**
+timer2 硬件上物理拉的就是 `TIMER_2_IRQN` 这根线。若写成 `TIMER_1_IRQN`，等于"我是 timer2 却去监听 timer1 的门铃"——timer2 真正按的门铃没人登记 → **中断进不来、回调永不触发**（还可能和 timer1 打架）。所以 `index=2` 就必须配 `TIMER_2_IRQN`。
+
+**⑤ 最后那个优先级参数**
+`adapter(2, TIMER_2_IRQN, 1)` 的 `1` 是**中断优先级**：多个中断同时来时，谁先处理、能否打断别人。一般小 demo 给个固定值即可。
+
 ---
 
 ## 三、API 全景（`include/driver/timer.h`）
